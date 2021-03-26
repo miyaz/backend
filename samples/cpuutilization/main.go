@@ -11,17 +11,18 @@ import (
 )
 
 func main() {
-	fmt.Println("CPU usage % at 1 second intervals:\n")
+	fmt.Println("CPU usage % at 1 second intervals:")
 	var prevIdleTime, prevTotalTime uint64
-	for i := 0; i < 100; i++ {
+
+	for i := 0; ; i++ {
 		file, err := os.Open("/proc/stat")
 		if err != nil {
 			log.Fatal(err)
 		}
+		defer file.Close()
 		scanner := bufio.NewScanner(file)
 		scanner.Scan()
 		firstLine := scanner.Text()[5:] // get rid of cpu plus 2 spaces
-		file.Close()
 		if err := scanner.Err(); err != nil {
 			log.Fatal(err)
 		}

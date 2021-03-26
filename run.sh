@@ -1,9 +1,9 @@
 #!/bin/bash
 
 cd `dirname $0`
-GOSAMPLE=${1:-samples/cpu/main.go}
+GO_SRCDIR=${1:-samples/cpuinfo}
 
-if [ `go get ... 2>&1 | wc -l` -ne 0 ]; then
+if [ $(go get ... 2>&1 | wc -l) -ne 0 ]; then
   go mod tidy
   docker-compose down
 fi
@@ -12,5 +12,5 @@ if [ $? -ne 0 ]; then
   docker-compose up -d --build
 fi
 
-docker-compose exec goapp go run $GOSAMPLE
+docker-compose exec goapp go run $GO_SRCDIR/*.go
 # docker-compose exec goapp bash
