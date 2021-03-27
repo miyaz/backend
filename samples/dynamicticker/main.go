@@ -3,46 +3,25 @@ package main
 import (
 	"fmt"
 	"log"
-	"runtime"
 	"time"
 )
 
 func main() {
-	startInterval := float64(1000)
 	quit := make(chan bool)
+	ratio := make(chan float64)
 
-	go func() {
-		ticker := time.NewTicker(time.Duration(startInterval) * time.Millisecond)
-		ratio := 0.95
-		//counter := 1.0
+	go cpuUsageController(ratio, quit)
 
-		for {
-			select {
-			case <-ticker.C:
-				startInterval *= ratio
-				if startInterval > 1.0 {
-					log.Println("ticker accelerating to " + fmt.Sprint(startInterval) + " ms")
-					ticker.Stop()
-					ticker = time.NewTicker(time.Duration(startInterval) * time.Millisecond)
-					//counter++
-					if startInterval > 1000 {
-						ratio = 0.95
-					}
-				} else {
-					ratio = 1.05
-				}
-				done := make(chan int)
-				go placeLoad(done)
-				go stopTimer(done)
-			case <-quit:
-				ticker.Stop()
-				log.Println("..ticker stopped!")
-				return
-			}
-		}
-	}()
-
-	time.Sleep(60 * time.Second)
+	time.Sleep(10 * time.Second)
+	for i := 0; i < 20; i++ {
+		ratio <- 0.7
+		time.Sleep(1 * time.Second)
+	}
+	time.Sleep(10 * time.Second)
+	for i := 0; i < 20; i++ {
+		ratio <- 1.5
+		time.Sleep(2 * time.Second)
+	}
 
 	log.Println("stopping ticker...")
 	quit <- true
@@ -50,21 +29,54 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 }
 
+func cpuUsageController(ratio chan float64, quit chan bool) {
+	interval := float64(1000)
+	prevInterval := interval
+	ticker := time.NewTicker(time.Duration(interval) * time.Millisecond)
+
+	for {
+		select {
+		case <-ticker.C:
+			done := make(chan int)
+			go placeLoad(done)
+			go stopTimer(done)
+		case newRatio := <-ratio:
+			if prevInterval != newRatio*interval {
+				interval *= newRatio
+				prevInterval = interval
+				if interval > 1.0 {
+					ticker.Stop()
+					ticker = time.NewTicker(time.Duration(interval) * time.Millisecond)
+					log.Println("ticker changing to " + fmt.Sprint(interval) + " ms")
+				} else {
+					log.Println("ticker no changing, cause be less than 1.0 ms")
+				}
+			}
+		case <-quit:
+			ticker.Stop()
+			log.Println("..ticker stopped!")
+			return
+		}
+	}
+}
+
 func stopTimer(done chan int) {
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	close(done)
 }
 
 func placeLoad(done chan int) {
-	for i := 0; i < runtime.NumCPU(); i++ {
-		go func() {
-			for {
-				select {
-				case <-done:
-					return
-				default:
-				}
+	//for i := 0; i < runtime.NumCPU(); i++ {
+	go func() {
+		x := 0
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				x++
 			}
-		}()
-	}
+		}
+	}()
+	//}
 }
