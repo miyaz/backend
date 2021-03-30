@@ -24,18 +24,12 @@ func main() {
 	cpuUsageChan := make(chan float64)
 	go cpuStress(store, cpuUsageChan)
 
-	cpuUsageChan <- 100
-	time.Sleep(30 * time.Second)
-	/*
-		cpuUsageChan <- 60
+	usages := []float64{100, 60, 0, 20, 95}
+	for _, usage := range usages {
+		fmt.Printf("[%6.2f]\n", usage)
+		cpuUsageChan <- usage
 		time.Sleep(30 * time.Second)
-		cpuUsageChan <- 0
-		time.Sleep(10 * time.Second)
-		cpuUsageChan <- 20
-		time.Sleep(60 * time.Second)
-		cpuUsageChan <- 95
-		time.Sleep(60 * time.Second)
-	*/
+	}
 }
 
 func cpuStress(ds *DataStore, cpuUsageChan chan float64) {
