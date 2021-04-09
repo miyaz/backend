@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -13,7 +14,7 @@ const (
 	letterIdxBits = 6                    // 6 bits to represent a letter index
 	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
 	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-	respSize      = 10240
+	respSize      = 102400
 )
 
 func main() {
@@ -25,6 +26,9 @@ func main() {
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s?%s %s", r.Method, r.URL.Path, r.URL.RawQuery, r.Proto)
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Length", strconv.Itoa(respSize))
+
 	//fmt.Fprint(w, host+"\n")
 	fw := bufio.NewWriter(w)
 	src := rand.New(rand.NewSource(time.Now().UnixNano()))
