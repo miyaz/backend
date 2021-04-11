@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -33,25 +35,28 @@ type ResourceData struct {
 
 // QueryString ... QueryString Values
 type QueryString struct {
-	Sleep      string `json:"sleep"`
-	Size       string `json:"size"`
-	Status     string `json:"status"`
-	IfHost     string `json:"ifhost"`
-	IfAZ       string `json:"ifaz"`
-	IfTargetIP string `json:"iftargetip"`
-	IfLBNodeIP string `json:"iflbnodeip"`
-	IfClientIP string `json:"ifclientip"`
+	Sleep      string `json:"sleep,omitempty"`
+	Size       string `json:"size,omitempty"`
+	Status     string `json:"status,omitempty"`
+	IfHost     string `json:"ifhost,omitempty"`
+	IfAZ       string `json:"ifaz,omitempty"`
+	IfServerIP string `json:"ifserverip,omitempty"`
+	IfTargetIP string `json:"iftargetip,omitempty"`
+	IfProxy1IP string `json:"ifproxy1ip,omitempty"`
+	IfProxy2IP string `json:"ifproxy2ip,omitempty"`
+	IfClientIP string `json:"ifclientip,omitempty"`
 }
 
 // HandleInfo ... handle info
 type HandleInfo struct {
-	MSleep           int64  `json:"sleep"`
-	ResponceSize     int64  `json:"size"`
-	StatusCode       int64  `json:"status"`
-	AvailabilityZone string `json:"az"`
-	TargetIP         string `json:"targetip"`
-	LBNodeIP         string `json:"lbnodeip"`
-	ClientIP         string `json:"clientip"`
+	MSleep       int64  `json:"sleep,omitempty"`
+	ResponceSize int64  `json:"size"`
+	Status       string `json:"status"`
+	ServerIP     string `json:"serverip,omitempty"`
+	TargetIP     string `json:"targetip,omitempty"`
+	Proxy2IP     string `json:"proxy2ip,omitempty"`
+	Proxy1IP     string `json:"proxy1ip,omitempty"`
+	ClientIP     string `json:"clientip"`
 }
 
 var store = &DataStore{&sync.RWMutex{}, ServerInfo{}, ResourceData{}, ResourceData{}}
@@ -85,8 +90,20 @@ func main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "host: %s\nip: %s\n\n", store.server.Name, store.server.IP)
-	fmt.Fprintf(w, "path:  %s\nquerystring: %s\n", r.URL.EscapedPath(), r.URL.Query().Encode())
+	//qs := &QueryString{}
+	hi := &HandleInfo{}
+	setHandleInfo(hi, r)
+	hiJSON, err := json.Marshal(hi)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Fprintf(w, string(hiJSON))
+
+	fmt.Fprintf(w, "host: %s\nremoteaddr: %s\n", r.Host, r.RemoteAddr)
+	fmt.Fprintf(w, "hostname: %s\nserverip: %s\n\n", store.server.Name, store.server.IP)
+	fmt.Fprintf(w, "path: %s\nquerystring: %s\n", r.URL.EscapedPath(), r.URL.Query().Encode())
+
+	fmt.Fprintf(w, "XFF: %v\n", splitXFF(r.Header.Get("X-Forwarded-For")))
 
 	fmt.Fprintf(w, "[Headers]\n")
 	for _, kv := range sortkeyValues(r.Header) {
@@ -97,6 +114,31 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "%s = %s\n", kv.key, kv.value)
 	}
 	fmt.Fprintf(w, "%v %v", store.server, store.current)
+}
+
+func setHandleInfo(hi *HandleInfo, r *http.Request) {
+	hi.TargetIP = store.server.IP
+	hi.ServerIP = strings.Split(r.Host, ":")[0]
+	xff := splitXFF(r.Header.Get("X-Forwarded-For"))
+	if len(xff) == 0 {
+		hi.ClientIP = strings.Split(r.RemoteAddr, ":")[0]
+	} else {
+		hi.ClientIP = xff[0]
+	}
+	if len(xff) >= 2 {
+		hi.Proxy1IP = xff[1]
+	}
+	if len(xff) >= 3 {
+		hi.Proxy2IP = xff[2]
+	}
+}
+
+func splitXFF(xffStr string) []string {
+	xff := strings.Split(xffStr, ",")
+	for i := range xff {
+		xff[i] = strings.TrimSpace(xff[i])
+	}
+	return xff
 }
 
 type keyValue struct {
