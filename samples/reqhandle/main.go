@@ -32,7 +32,7 @@ type ResourceInfo struct {
 	Memory ResourceUsage `json:"memory"`
 }
 
-// ResourceUsage  .. information of os resource usage
+// ResourceUsage ... information of os resource usage
 type ResourceUsage struct {
 	*sync.RWMutex
 	Target  float64 `json:"target"`
@@ -62,18 +62,23 @@ func (ru *ResourceUsage) setCurrent(value float64) {
 
 // RequestInfo ... information of request
 type RequestInfo struct {
-	Path      string            `json:"path"`
-	Query     string            `json:"querystring"`
-	Headers   map[string]string `json:"headers"`
-	Rawquery  *QueryString      `json:"rawquery"`
-	Evaluated *QueryString      `json:"validatedQuery"`
+	Path   string            `json:"path"`
+	Query  string            `json:"querystring"`
+	Header map[string]string `json:"header"`
+}
+
+// Direction ... information of directions
+type Direction struct {
+	Input *QueryString `json:"input"`
+	Order *QueryString `json:"order"`
 }
 
 // ResponseInfo ... information of response
 type ResponseInfo struct {
-	Host     HostInfo     `json:"host"`
-	Resource ResourceInfo `json:"resource"`
-	Request  RequestInfo  `json:"request"`
+	Host      HostInfo     `json:"host"`
+	Resource  ResourceInfo `json:"resource"`
+	Request   RequestInfo  `json:"request"`
+	Direction Direction    `json:"direction"`
 }
 
 var store = &DataStore{
@@ -188,10 +193,11 @@ func main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
+	//w.WriteHeader(http.StatusNotFound)
 	reqInfo := RequestInfo{
-		Path:    r.URL.EscapedPath(),
-		Query:   r.URL.Query().Encode(),
-		Headers: combineValues(r.Header),
+		Path:   r.URL.EscapedPath(),
+		Query:  r.URL.Query().Encode(),
+		Header: combineValues(r.Header),
 	}
 	respInfo := ResponseInfo{
 		Host: store.host,
@@ -199,11 +205,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			CPU:    ResourceUsage{Target: store.resource.CPU.getTarget(), Current: store.resource.CPU.getCurrent()},
 			Memory: ResourceUsage{Target: store.resource.Memory.getTarget(), Current: store.resource.Memory.getCurrent()},
 		},
-		Request: reqInfo,
+		Request:   reqInfo,
+		Direction: Direction{},
 	}
 
-	qs := validateQueryString(r.URL.Query())
-	respInfo.Request.Rawquery = qs
+	inputQs := validateQueryString(r.URL.Query())
+	orderQs := evaluateQueryString(inputQs)
+	fmt.Printf("%p %p\n", &(inputQs.Size), &(orderQs.Size))
+	respInfo.Direction.Input = inputQs
+	respInfo.Direction.Order = orderQs
 	s, _ := json.MarshalIndent(respInfo, "", "  ")
 	fmt.Fprintf(w, "\n%s\n", string(s))
 }
@@ -216,9 +226,9 @@ func combineValues(input map[string][]string) map[string]string {
 	return output
 }
 
-func validateQueryString(inQs map[string][]string) *QueryString {
+func validateQueryString(mapQs map[string][]string) *QueryString {
 	qs := &QueryString{}
-	for key, value := range combineValues(inQs) {
+	for key, value := range combineValues(mapQs) {
 		if re, ok := store.validator[key]; ok {
 			if len(re.FindStringSubmatch(value)) > 0 {
 				qs.setValue(key, value)
@@ -231,6 +241,13 @@ func validateQueryString(inQs map[string][]string) *QueryString {
 			}
 		}
 	}
+	return qs
+}
 
+func evaluateQueryString(inputQs *QueryString) *QueryString {
+	if !inputQs.existsAction {
+		return &QueryString{}
+	}
+	qs := inputQs
 	return qs
 }
