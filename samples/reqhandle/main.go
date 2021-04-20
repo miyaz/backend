@@ -62,15 +62,19 @@ func (ru *ResourceUsage) setCurrent(value float64) {
 
 // RequestInfo ... information of request
 type RequestInfo struct {
-	Path   string            `json:"path"`
-	Query  string            `json:"querystring"`
-	Header map[string]string `json:"header"`
+	Path     string            `json:"path"`
+	Query    string            `json:"querystring"`
+	Header   map[string]string `json:"header"`
+	ClientIP string            `json:"clientip"`
+	Proxy1IP string            `json:"proxy1ip"`
+	Proxy2IP string            `json:"proxy2ip"`
+	TargetIP string            `json:"targetip"`
 }
 
 // Direction ... information of directions
 type Direction struct {
-	Input *QueryString `json:"input"`
-	Order *QueryString `json:"order"`
+	Input   *QueryString `json:"input"`
+	Process *QueryString `json:"process"`
 }
 
 // ResponseInfo ... information of response
@@ -199,6 +203,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		Query:  r.URL.Query().Encode(),
 		Header: combineValues(r.Header),
 	}
+	setIPAddresse(&reqInfo, r)
 	respInfo := ResponseInfo{
 		Host: store.host,
 		Resource: ResourceInfo{
@@ -210,10 +215,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inputQs := validateQueryString(r.URL.Query())
-	orderQs := evaluateQueryString(inputQs)
-	fmt.Printf("%p %p\n", &(inputQs.Size), &(orderQs.Size))
+	processQs := evaluateQueryString(inputQs)
 	respInfo.Direction.Input = inputQs
-	respInfo.Direction.Order = orderQs
+	respInfo.Direction.Process = processQs
 	s, _ := json.MarshalIndent(respInfo, "", "  ")
 	fmt.Fprintf(w, "\n%s\n", string(s))
 }
@@ -248,6 +252,82 @@ func evaluateQueryString(inputQs *QueryString) *QueryString {
 	if !inputQs.existsAction {
 		return &QueryString{}
 	}
+	// condition evaluation
+
+	// action evaluation
+
 	qs := inputQs
 	return qs
 }
+
+func setIPAddresse(reqInfo *RequestInfo, r *http.Request) {
+	reqInfo.TargetIP = extractIPAddress(r.Host)
+	xff := splitXFF(r.Header.Get("X-Forwarded-For"))
+	if len(xff) == 0 {
+		reqInfo.ClientIP = extractIPAddress(r.RemoteAddr)
+	} else {
+		reqInfo.ClientIP = xff[0]
+	}
+	if len(xff) >= 2 {
+		reqInfo.Proxy1IP = xff[1]
+	}
+	if len(xff) >= 3 {
+		reqInfo.Proxy2IP = xff[2]
+	}
+}
+
+func extractIPAddress(ipport string) string {
+	var ipaddr string
+	if strings.HasPrefix(ipport, "[") {
+		ipaddr = strings.Join(strings.Split(ipport, ":")[:len(strings.Split(ipport, ":"))-1], ":")
+		ipaddr = strings.Trim(ipaddr, "[]")
+	} else {
+		ipaddr = strings.Split(ipport, ":")[0]
+	}
+	return ipaddr
+}
+
+func splitXFF(xffStr string) []string {
+	xff := strings.Split(xffStr, ",")
+	for i := range xff {
+		xff[i] = strings.TrimSpace(xff[i])
+	}
+	return xff
+}
+
+/*
+	src := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	loopCount := respSize / 100
+	remainder := respSize % 100
+	for i := 0; i < loopCount; i++ {
+		fw.Write(randBytes(src, 99))
+		fw.Write([]byte("\n"))
+	}
+	if remainder != 0 {
+		fw.Write(randBytes(src, remainder))
+	}
+
+	err := fw.Flush()
+	if err != nil {
+		log.Fatalln(err)
+	}
+}
+
+func randBytes(src *rand.Rand, n int) []byte {
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+	return b
+}
+*/
