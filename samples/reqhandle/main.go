@@ -45,9 +45,11 @@ func (ru *ResourceUsage) getTarget() float64 {
 	return ru.Target
 }
 func (ru *ResourceUsage) setTarget(value float64) {
-	ru.Lock()
-	defer ru.Unlock()
-	ru.Target = value
+	if ru.getTarget() != value {
+		ru.Lock()
+		defer ru.Unlock()
+		ru.Target = value
+	}
 }
 func (ru *ResourceUsage) getCurrent() float64 {
 	ru.RLock()
@@ -55,26 +57,28 @@ func (ru *ResourceUsage) getCurrent() float64 {
 	return ru.Current
 }
 func (ru *ResourceUsage) setCurrent(value float64) {
-	ru.Lock()
-	defer ru.Unlock()
-	ru.Current = value
+	if ru.getCurrent() != value {
+		ru.Lock()
+		defer ru.Unlock()
+		ru.Current = value
+	}
 }
 
 // RequestInfo ... information of request
 type RequestInfo struct {
 	Path     string            `json:"path"`
-	Query    string            `json:"querystring"`
+	Query    string            `json:"querystring,omitempty"`
 	Header   map[string]string `json:"header"`
 	ClientIP string            `json:"clientip"`
-	Proxy1IP string            `json:"proxy1ip"`
-	Proxy2IP string            `json:"proxy2ip"`
+	Proxy1IP string            `json:"proxy1ip,omitempty"`
+	Proxy2IP string            `json:"proxy2ip,omitempty"`
 	TargetIP string            `json:"targetip"`
 }
 
 // Direction ... information of directions
 type Direction struct {
-	Input   *QueryString `json:"input"`
-	Process *QueryString `json:"process"`
+	Input  *QueryString `json:"input"`
+	Action *QueryString `json:"action"`
 }
 
 // ResponseInfo ... information of response
@@ -91,11 +95,6 @@ var store = &DataStore{
 	newValidator(),
 }
 
-type keyValue struct {
-	key   string
-	value string
-}
-
 // QueryString ... QueryString Values
 type QueryString struct {
 	CPU          string `json:"cpu,omitempty"`
@@ -104,6 +103,7 @@ type QueryString struct {
 	Size         string `json:"size,omitempty"`
 	Status       string `json:"status,omitempty"`
 	existsAction bool
+	needsAction  bool
 	IfClientIP   string `json:"ifclientip,omitempty"`
 	IfProxy1IP   string `json:"ifproxy1ip,omitempty"`
 	IfProxy2IP   string `json:"ifproxy2ip,omitempty"`
@@ -203,7 +203,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		Query:  r.URL.Query().Encode(),
 		Header: combineValues(r.Header),
 	}
-	setIPAddresse(&reqInfo, r)
+	reqInfo.setIPAddresse(r)
 	respInfo := ResponseInfo{
 		Host: store.host,
 		Resource: ResourceInfo{
@@ -214,12 +214,34 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		Direction: Direction{},
 	}
 
-	inputQs := validateQueryString(r.URL.Query())
-	processQs := evaluateQueryString(inputQs)
+	inputQs := reqInfo.validateQueryString(r.URL.Query())
+	actionQs := inputQs.evaluate(&reqInfo)
 	respInfo.Direction.Input = inputQs
-	respInfo.Direction.Process = processQs
+	respInfo.Direction.Action = actionQs
 	s, _ := json.MarshalIndent(respInfo, "", "  ")
 	fmt.Fprintf(w, "\n%s\n", string(s))
+}
+
+func (reqInfo *RequestInfo) validateQueryString(mapQs map[string][]string) *QueryString {
+	qs := &QueryString{needsAction: true}
+	for key, value := range combineValues(mapQs) {
+		if re, ok := store.validator[key]; ok {
+			if len(re.FindStringSubmatch(value)) > 0 {
+				qs.setValue(key, value)
+				if strings.HasPrefix(key, "if") {
+					if reqInfo.getActualValue(key) != value {
+						qs.needsAction = false
+					}
+				} else {
+					qs.existsAction = true
+					fmt.Printf("  valid %s = %s\n", key, value)
+				}
+			} else {
+				fmt.Printf("invalid %s = %s\n", key, value)
+			}
+		}
+	}
+	return qs
 }
 
 func combineValues(input map[string][]string) map[string]string {
@@ -230,37 +252,7 @@ func combineValues(input map[string][]string) map[string]string {
 	return output
 }
 
-func validateQueryString(mapQs map[string][]string) *QueryString {
-	qs := &QueryString{}
-	for key, value := range combineValues(mapQs) {
-		if re, ok := store.validator[key]; ok {
-			if len(re.FindStringSubmatch(value)) > 0 {
-				qs.setValue(key, value)
-				if !strings.HasPrefix(key, "if") {
-					qs.existsAction = true
-				}
-				fmt.Printf("  valid %s = %s\n", key, value)
-			} else {
-				fmt.Printf("invalid %s = %s\n", key, value)
-			}
-		}
-	}
-	return qs
-}
-
-func evaluateQueryString(inputQs *QueryString) *QueryString {
-	if !inputQs.existsAction {
-		return &QueryString{}
-	}
-	// condition evaluation
-
-	// action evaluation
-
-	qs := inputQs
-	return qs
-}
-
-func setIPAddresse(reqInfo *RequestInfo, r *http.Request) {
+func (reqInfo *RequestInfo) setIPAddresse(r *http.Request) {
 	reqInfo.TargetIP = extractIPAddress(r.Host)
 	xff := splitXFF(r.Header.Get("X-Forwarded-For"))
 	if len(xff) == 0 {
@@ -288,6 +280,9 @@ func extractIPAddress(ipport string) string {
 }
 
 func splitXFF(xffStr string) []string {
+	if xffStr == "" {
+		return []string{}
+	}
 	xff := strings.Split(xffStr, ",")
 	for i := range xff {
 		xff[i] = strings.TrimSpace(xff[i])
@@ -295,39 +290,35 @@ func splitXFF(xffStr string) []string {
 	return xff
 }
 
-/*
-	src := rand.New(rand.NewSource(time.Now().UnixNano()))
+func (qs *QueryString) evaluate(reqInfo *RequestInfo) *QueryString {
+	actionQs := &QueryString{}
+	if !qs.existsAction {
+		return actionQs
+	}
+	if !qs.needsAction {
+		return actionQs
+	}
+	// action evaluation
 
-	loopCount := respSize / 100
-	remainder := respSize % 100
-	for i := 0; i < loopCount; i++ {
-		fw.Write(randBytes(src, 99))
-		fw.Write([]byte("\n"))
-	}
-	if remainder != 0 {
-		fw.Write(randBytes(src, remainder))
-	}
-
-	err := fw.Flush()
-	if err != nil {
-		log.Fatalln(err)
-	}
+	return qs
 }
 
-func randBytes(src *rand.Rand, n int) []byte {
-	b := make([]byte, n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
+func (reqInfo *RequestInfo) getActualValue(key string) (ret string) {
+	switch key {
+	case "ifclientip":
+		ret = reqInfo.ClientIP
+	case "ifproxy1ip":
+		ret = reqInfo.Proxy1IP
+	case "ifproxy2ip":
+		ret = reqInfo.Proxy2IP
+	case "iftargetip":
+		ret = reqInfo.TargetIP
+	case "ifhostip":
+		ret = store.host.IP
+	case "ifhost":
+		ret = store.host.Name
+	case "ifaz":
+		ret = store.host.AZ
 	}
-	return b
+	return
 }
-*/
