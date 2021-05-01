@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -17,8 +20,9 @@ import (
 
 // DataStore ... Variables that use mutex
 type DataStore struct {
-	host HostInfo
-	node NodeInfo
+	*sync.RWMutex
+	host *HostInfo
+	node *NodeInfo
 }
 
 // HostInfo ... information of host
@@ -30,8 +34,8 @@ type HostInfo struct {
 // NodeInfo ... information of node
 type NodeInfo struct {
 	*sync.RWMutex
-	Count    int64 `json:"count"`
-	UpdateAt int64 `json:"update_at"`
+	Count int64 `json:"count"`
+	Time  int64 `json:"time"`
 }
 
 func (ni *NodeInfo) getCount() int64 {
@@ -39,21 +43,50 @@ func (ni *NodeInfo) getCount() int64 {
 	defer ni.RUnlock()
 	return ni.Count
 }
+func (ni *NodeInfo) setCount(cnt int64) {
+	ni.Lock()
+	defer ni.Unlock()
+	ni.Count = cnt
+}
 func (ni *NodeInfo) countUp() {
 	ni.Lock()
 	defer ni.Unlock()
 	ni.Count++
-	ni.UpdateAt = time.Now().UnixNano()
+	ni.Time = time.Now().UnixNano()
 }
-func (ni *NodeInfo) getUpdateAt() int64 {
+func (ni *NodeInfo) getTime() int64 {
 	ni.RLock()
 	defer ni.RUnlock()
-	return ni.UpdateAt
+	return ni.Time
+}
+func (ni *NodeInfo) getClone() *NodeInfo {
+	ni.RLock()
+	defer ni.RUnlock()
+	node := *ni
+	return &node
 }
 func (ni *NodeInfo) setNow() {
 	ni.Lock()
 	defer ni.Unlock()
-	ni.UpdateAt = time.Now().UnixNano()
+	ni.Time = time.Now().UnixNano()
+}
+
+// Syncer ... Latest Data for Syncer
+type Syncer struct {
+	*sync.RWMutex
+	Time  int64             `json:"time"`
+	Nodes map[int]*NodeInfo `json:"nodes"`
+}
+
+func (s *Syncer) setNow() {
+	s.Lock()
+	defer s.Unlock()
+	s.Time = time.Now().UnixNano()
+}
+func (s *Syncer) getTime() int64 {
+	s.RLock()
+	defer s.RUnlock()
+	return s.Time
 }
 
 // RequestInfo ... information of request
@@ -74,11 +107,12 @@ type ResponseInfo struct {
 }
 
 var store = &DataStore{
-	HostInfo{},
-	NodeInfo{&sync.RWMutex{}, 0, time.Now().UnixNano()},
+	&sync.RWMutex{},
+	&HostInfo{},
+	&NodeInfo{&sync.RWMutex{}, 0, time.Now().UnixNano()},
 }
 var listenPort int
-var nodes = map[int]*NodeInfo{}
+var syncer = Syncer{&sync.RWMutex{}, time.Now().UnixNano(), map[int]*NodeInfo{}}
 
 func getIPAddress() string {
 	var currentIP string
@@ -103,40 +137,37 @@ func main() {
 	flag.Parse()
 	fmt.Println("Listen Port : ", listenPort)
 
-	nodes[listenPort] = &store.node
+	go loopSyncer()
+
+	syncer.Nodes[listenPort] = store.node
 	store.host.Name, _ = os.Hostname()
 	store.host.IP = getIPAddress()
 	http.HandleFunc("/", topHandler)
 	http.HandleFunc("/syncer/", syncerHandler)
-	srv := &http.Server{Addr: ":" + strconv.Itoa(listenPort)}
+	srv := &http.Server{
+		Addr:        ":" + strconv.Itoa(listenPort),
+		IdleTimeout: 65 * time.Second,
+	}
 	log.Fatalln(srv.ListenAndServe())
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
 	//w.WriteHeader(http.StatusNotFound)
-	store.node.countUp()
+	//w.Header().Set("Connection", "close")
 	reqInfo := RequestInfo{
 		Path:   r.URL.EscapedPath(),
 		Query:  r.URL.Query().Encode(),
 		Header: combineValues(r.Header),
-		Node:   store.node,
+		Node:   NodeInfo{Time: store.node.getTime(), Count: store.node.getCount()},
 	}
 	reqInfo.setIPAddresse(r)
-
-	nodesStr, _ := json.MarshalIndent(nodes, "", "  ")
-	fmt.Fprintf(w, "\n%s\n", string(nodesStr))
-
 	s, _ := json.MarshalIndent(reqInfo, "", "  ")
 	fmt.Fprintf(w, "\n%s\n", string(s))
 
-	inputStr := []byte(`{ "8000": { "count": 6, "update_at": 1619351214434379100 } }`)
-	var inputNodes map[int]NodeInfo
-	if err := json.Unmarshal(inputStr, &inputNodes); err != nil {
-		panic(err)
-	}
-	inputNodes[listenPort] = store.node
-	n, _ := json.MarshalIndent(inputNodes, "", "  ")
-	fmt.Fprintf(w, "\n%s\n", string(n))
+	syncer.RLock()
+	defer syncer.RUnlock()
+	syncerJSON, _ := json.MarshalIndent(syncer, "", "  ")
+	fmt.Fprintf(w, "\n%s\n", string(syncerJSON))
 }
 
 func clear() {
@@ -154,8 +185,71 @@ func combineValues(input map[string][]string) map[string]string {
 }
 
 func syncerHandler(w http.ResponseWriter, r *http.Request) {
-	s := "syncer"
-	fmt.Fprintf(w, "\n%s\n", string(s))
+	store.node.countUp()
+	switch r.Method {
+	case http.MethodGet:
+		w.WriteHeader(http.StatusBadRequest)
+	case http.MethodPost:
+		body := r.Body
+		defer body.Close()
+		buf := new(bytes.Buffer)
+		io.Copy(buf, body)
+		//wkSyncer := Syncer{&sync.RWMutex{}, time.Now().UnixNano(), map[int]NodeInfo{}}
+		wkSyncer := Syncer{} // RWMutex や map にアクセスしなければ初期化は不要
+		if err := json.Unmarshal(buf.Bytes(), &wkSyncer); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "Bad Request\n")
+		} else {
+			mergeSyncer(&wkSyncer)
+			fmt.Fprintln(w, string(getSyncerJSON()))
+		}
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		fmt.Fprint(w, "Method not allowed.\n")
+	}
+}
+
+func mergeSyncer(inSyncer *Syncer) {
+	if inSyncer == nil || inSyncer.Nodes == nil {
+		return
+	}
+	for inPort, inNode := range inSyncer.Nodes {
+		if inPort == listenPort {
+			continue
+		}
+		if inNode.RWMutex == nil {
+			inNode.RWMutex = &sync.RWMutex{}
+		}
+		if node, ok := syncer.Nodes[inPort]; ok {
+			if node.getTime() < inNode.getTime() {
+				syncer.Nodes[inPort].setCount(inNode.getCount())
+				syncer.Nodes[inPort].setNow()
+			}
+		} else {
+			syncer.Lock()
+			syncer.Nodes[inPort] = inNode
+			syncer.Unlock()
+		}
+	}
+}
+
+func getSyncerJSON() []byte {
+	updateSyncer()
+	syncer.RLock()
+	defer syncer.RUnlock()
+	syncerJSON, err := json.MarshalIndent(syncer, "", "  ")
+	if err != nil {
+		fmt.Printf("failed to json.MarshalIndent: %v", err)
+		return []byte{}
+	}
+	return syncerJSON
+}
+func updateSyncer() {
+	syncer.setNow()
+	store.node.setNow()
+	syncer.Lock()
+	defer syncer.Unlock()
+	syncer.Nodes[listenPort] = store.node.getClone()
 }
 
 func (reqInfo *RequestInfo) setIPAddresse(r *http.Request) {
@@ -173,4 +267,59 @@ func extractIPAddress(ipport string) string {
 		ipaddr = strings.Split(ipport, ":")[0]
 	}
 	return ipaddr
+}
+
+func loopSyncer() {
+	for {
+		time.Sleep(500 * time.Millisecond)
+		syncer.RLock()
+		//index := rand.Intn(len(syncer.Nodes))
+		//count := 0
+		var minTimePort int
+		minTime := time.Now().UnixNano()
+		now := time.Now().UnixNano()
+		wkPort := listenPort
+		for inPort := range syncer.Nodes {
+			//if count == index {
+			//	wkPort = inPort
+			//}
+			//count++
+			curTime := syncer.Nodes[inPort].getTime()
+			if minTime > curTime {
+				minTime = curTime
+				minTimePort = inPort
+			}
+		}
+		wkPort = minTimePort
+		syncer.RUnlock()
+		if wkPort != listenPort {
+			fmt.Printf("port %d : %d - %d = %d \n", wkPort, now, minTime, now-minTime)
+			execSyncer("http://localhost:" + strconv.Itoa(wkPort) + "/syncer/")
+			//clear()
+			fmt.Println(string(getSyncerJSON()))
+			fmt.Println(wkPort)
+		}
+	}
+}
+
+func execSyncer(url string) {
+	c := &http.Client{
+		Timeout: 500 * time.Millisecond,
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(getSyncerJSON()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Close = true
+	resp, err := c.Do(req)
+	if err != nil {
+		fmt.Printf("failed to http.Post: %v", err)
+	} else {
+		defer resp.Body.Close()
+		if byteArray, err := ioutil.ReadAll(resp.Body); err != nil {
+			fmt.Println(byteArray)
+			wkSyncer := Syncer{} // RWMutex や map にアクセスしなければ初期化は不要
+			if err := json.Unmarshal(byteArray, &wkSyncer); err != nil {
+				mergeSyncer(&wkSyncer)
+			}
+		}
+	}
 }
