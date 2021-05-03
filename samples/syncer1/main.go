@@ -137,11 +137,11 @@ func main() {
 	flag.Parse()
 	fmt.Println("Listen Port : ", listenPort)
 
-	go loopSyncer()
-
 	syncer.Nodes[listenPort] = store.node
 	store.host.Name, _ = os.Hostname()
 	store.host.IP = getIPAddress()
+	go loopSyncer()
+
 	http.HandleFunc("/", topHandler)
 	http.HandleFunc("/syncer/", syncerHandler)
 	srv := &http.Server{
@@ -199,6 +199,7 @@ func syncerHandler(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(buf.Bytes(), &wkSyncer); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, "Bad Request\n")
+			fmt.Printf("failed to json.MarshalIndent: %v", err)
 		} else {
 			mergeSyncer(&wkSyncer)
 			fmt.Fprintln(w, string(getSyncerJSON()))
@@ -270,34 +271,34 @@ func extractIPAddress(ipport string) string {
 }
 
 func loopSyncer() {
+	sleep := 500
 	for {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(time.Duration(sleep) * time.Millisecond)
 		syncer.RLock()
 		//index := rand.Intn(len(syncer.Nodes))
 		//count := 0
-		var minTimePort int
 		minTime := time.Now().UnixNano()
 		now := time.Now().UnixNano()
-		wkPort := listenPort
+		destPort := listenPort
 		for inPort := range syncer.Nodes {
 			//if count == index {
-			//	wkPort = inPort
+			//	destPort = inPort
 			//}
 			//count++
 			curTime := syncer.Nodes[inPort].getTime()
 			if minTime > curTime {
 				minTime = curTime
-				minTimePort = inPort
+				destPort = inPort
 			}
 		}
-		wkPort = minTimePort
 		syncer.RUnlock()
-		if wkPort != listenPort {
-			fmt.Printf("port %d : %d - %d = %d \n", wkPort, now, minTime, now-minTime)
-			execSyncer("http://localhost:" + strconv.Itoa(wkPort) + "/syncer/")
+		delta := (float64)(now-minTime) / 1000000000
+		if destPort != listenPort {
+			fmt.Printf("port %d : %d - %d = %d (%f sec)\n", destPort, now, minTime, now-minTime, delta)
+			execSyncer("http://localhost:" + strconv.Itoa(destPort) + "/syncer/")
 			//clear()
 			fmt.Println(string(getSyncerJSON()))
-			fmt.Println(wkPort)
+			fmt.Println(destPort)
 		}
 	}
 }
@@ -307,19 +308,24 @@ func execSyncer(url string) {
 		Timeout: 500 * time.Millisecond,
 	}
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(getSyncerJSON()))
+	if err != nil {
+		fmt.Printf("failed to http.NewRequest: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Close = true
 	resp, err := c.Do(req)
 	if err != nil {
-		fmt.Printf("failed to http.Post: %v", err)
+		fmt.Printf("failed to c.Do: %v", err)
 	} else {
 		defer resp.Body.Close()
-		if byteArray, err := ioutil.ReadAll(resp.Body); err != nil {
-			fmt.Println(byteArray)
-			wkSyncer := Syncer{} // RWMutex や map にアクセスしなければ初期化は不要
-			if err := json.Unmarshal(byteArray, &wkSyncer); err != nil {
-				mergeSyncer(&wkSyncer)
-			}
+		byteArray, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Printf("failed to ioutil.ReadAll: %v", err)
 		}
+		wkSyncer := Syncer{} // RWMutex や map にアクセスしなければ初期化は不要
+		if err := json.Unmarshal(byteArray, &wkSyncer); err != nil {
+			fmt.Printf("failed to json.Unmarshal: %v", err)
+		}
+		mergeSyncer(&wkSyncer)
 	}
 }
