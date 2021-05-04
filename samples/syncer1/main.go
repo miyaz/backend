@@ -34,8 +34,9 @@ type HostInfo struct {
 // NodeInfo ... information of node
 type NodeInfo struct {
 	*sync.RWMutex
-	Count int64 `json:"count"`
-	Time  int64 `json:"time"`
+	Count     int64 `json:"count"`
+	Time      int64 `json:"time"`
+	Reachable bool  `json:"reachable"`
 }
 
 func (ni *NodeInfo) getCount() int64 {
@@ -58,6 +59,21 @@ func (ni *NodeInfo) getTime() int64 {
 	ni.RLock()
 	defer ni.RUnlock()
 	return ni.Time
+}
+func (ni *NodeInfo) setTime(_time int64) {
+	ni.Lock()
+	defer ni.Unlock()
+	ni.Time = _time
+}
+func (ni *NodeInfo) isReachable() bool {
+	ni.RLock()
+	defer ni.RUnlock()
+	return ni.Reachable
+}
+func (ni *NodeInfo) setReachable(r bool) {
+	ni.Lock()
+	defer ni.Unlock()
+	ni.Reachable = r
 }
 func (ni *NodeInfo) getClone() *NodeInfo {
 	ni.RLock()
@@ -109,7 +125,7 @@ type ResponseInfo struct {
 var store = &DataStore{
 	&sync.RWMutex{},
 	&HostInfo{},
-	&NodeInfo{&sync.RWMutex{}, 0, time.Now().UnixNano()},
+	&NodeInfo{&sync.RWMutex{}, 0, time.Now().UnixNano(), true},
 }
 var listenPort int
 var syncer = Syncer{&sync.RWMutex{}, time.Now().UnixNano(), map[int]*NodeInfo{}}
@@ -224,10 +240,12 @@ func mergeSyncer(inSyncer *Syncer) {
 		if node, ok := syncer.Nodes[inPort]; ok {
 			if node.getTime() < inNode.getTime() {
 				syncer.Nodes[inPort].setCount(inNode.getCount())
-				syncer.Nodes[inPort].setNow()
+				syncer.Nodes[inPort].setTime(inNode.getTime())
+				syncer.Nodes[inPort].setReachable(inNode.isReachable())
 			}
 		} else {
 			syncer.Lock()
+			inNode.setReachable(true)
 			syncer.Nodes[inPort] = inNode
 			syncer.Unlock()
 		}
@@ -272,60 +290,62 @@ func extractIPAddress(ipport string) string {
 
 func loopSyncer() {
 	sleep := 500
+	ticker := time.NewTicker(time.Duration(sleep) * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		time.Sleep(time.Duration(sleep) * time.Millisecond)
-		syncer.RLock()
-		//index := rand.Intn(len(syncer.Nodes))
-		//count := 0
-		minTime := time.Now().UnixNano()
-		now := time.Now().UnixNano()
-		destPort := listenPort
-		for inPort := range syncer.Nodes {
-			//if count == index {
-			//	destPort = inPort
-			//}
-			//count++
-			curTime := syncer.Nodes[inPort].getTime()
-			if minTime > curTime {
-				minTime = curTime
-				destPort = inPort
+		select {
+		case <-ticker.C:
+			syncer.RLock()
+			minTime := time.Now().UnixNano()
+			now := time.Now().UnixNano()
+			destPort := listenPort
+			for inPort := range syncer.Nodes {
+				curTime := syncer.Nodes[inPort].getTime()
+				if minTime > curTime && syncer.Nodes[inPort].isReachable() {
+					minTime = curTime
+					destPort = inPort
+				}
 			}
-		}
-		syncer.RUnlock()
-		delta := (float64)(now-minTime) / 1000000000
-		if destPort != listenPort {
-			fmt.Printf("port %d : %d - %d = %d (%f sec)\n", destPort, now, minTime, now-minTime, delta)
-			execSyncer("http://localhost:" + strconv.Itoa(destPort) + "/syncer/")
+			syncer.RUnlock()
+			if destPort == listenPort {
+				continue
+			}
+			delta := (float64)(now-minTime) / 1000000000
+			syncer.Nodes[destPort].setReachable(execSyncer("http://localhost:" + strconv.Itoa(destPort) + "/syncer/"))
 			//clear()
 			fmt.Println(string(getSyncerJSON()))
-			fmt.Println(destPort)
+			fmt.Printf("port %d : %d - %d = %d (%f sec)\n", destPort, now, minTime, now-minTime, delta)
 		}
 	}
 }
 
-func execSyncer(url string) {
+func execSyncer(url string) bool {
 	c := &http.Client{
 		Timeout: 500 * time.Millisecond,
 	}
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(getSyncerJSON()))
 	if err != nil {
 		fmt.Printf("failed to http.NewRequest: %v", err)
+		return false
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Close = true
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Printf("failed to c.Do: %v", err)
-	} else {
-		defer resp.Body.Close()
-		byteArray, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Printf("failed to ioutil.ReadAll: %v", err)
-		}
-		wkSyncer := Syncer{} // RWMutex や map にアクセスしなければ初期化は不要
-		if err := json.Unmarshal(byteArray, &wkSyncer); err != nil {
-			fmt.Printf("failed to json.Unmarshal: %v", err)
-		}
-		mergeSyncer(&wkSyncer)
+		return false
 	}
+	defer resp.Body.Close()
+
+	byteArray, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("failed to ioutil.ReadAll: %v", err)
+	}
+	wkSyncer := Syncer{} // RWMutex や map にアクセスしなければ初期化は不要
+	if err := json.Unmarshal(byteArray, &wkSyncer); err != nil {
+		fmt.Printf("failed to json.Unmarshal: %v", err)
+	}
+	mergeSyncer(&wkSyncer)
+	return true
 }
